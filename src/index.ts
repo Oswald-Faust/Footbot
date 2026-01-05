@@ -34,16 +34,21 @@ async function main() {
   }
   
   // Start a simple HTTP server for Health Checks (Required for Render/Heroku Web Services)
+  // We run this in all environments to prevent Render/Heroku timeouts if NODE_ENV isn't set correctly
   const PORT = process.env.PORT || 3000;
-  if (process.env.NODE_ENV === 'production') {
+  
+  try {
     const http = await import('http');
     const server = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end('FootBot is running');
     });
+    
     server.listen(PORT, () => {
       logger.info(`🏥 Health Check Server listening on port ${PORT}`);
     });
+  } catch (e) {
+    logger.warn('Failed to start health check server', e);
   }
 
   // Start the bot
