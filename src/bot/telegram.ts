@@ -4,6 +4,7 @@ import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { matchAnalyzer } from '../analysis/analyzer.js';
 import axios from 'axios';
+import { MatchReport } from '../models/types.js';
 
 // Custom context with session data
 interface BotContext extends Context {
@@ -13,6 +14,7 @@ interface BotContext extends Context {
       away: string;
       competition?: string;
     };
+    lastReport?: MatchReport;
     awaitingCorrection?: boolean;
   };
 }
@@ -138,7 +140,7 @@ bot.command('analyze', async (ctx) => {
   );
   
   try {
-    const { telegramMessage } = await matchAnalyzer.analyzeMatch(homeTeam, awayTeam);
+    const { report, telegramMessage } = await matchAnalyzer.analyzeMatch(homeTeam, awayTeam);
     
     // Delete processing message
     await ctx.telegram.deleteMessage(ctx.chat.id, processingMsg.message_id).catch(() => {});
@@ -160,6 +162,7 @@ bot.command('analyze', async (ctx) => {
     // Save to session
     if (ctx.session) {
       ctx.session.lastMatch = { home: homeTeam, away: awayTeam };
+      ctx.session.lastReport = report;
     }
   } catch (error) {
     logger.error('Manual analysis failed', { error, homeTeam, awayTeam });
@@ -214,7 +217,7 @@ bot.on(message('photo'), async (ctx) => {
     ).catch(() => {});
     
     // Analyze the image
-    const { telegramMessage, matchCandidate } = await matchAnalyzer.analyzeFromImage(imageBuffer, mimeType);
+    const { report, telegramMessage, matchCandidate } = await matchAnalyzer.analyzeFromImage(imageBuffer, mimeType);
     
     // Delete processing message
     await ctx.telegram.deleteMessage(ctx.chat.id, processingMsg.message_id).catch(() => {});
@@ -254,6 +257,7 @@ bot.on(message('photo'), async (ctx) => {
         away: matchCandidate.teamAway,
         competition: matchCandidate.competition || undefined,
       };
+      ctx.session.lastReport = report;
     }
     
     logger.info('Analysis sent successfully', {
@@ -295,8 +299,14 @@ bot.action(/^reanalyze:(.+):(.+)$/, async (ctx) => {
   await ctx.reply('⏳ Nouvelle analyse en cours...');
   
   try {
-    const { telegramMessage } = await matchAnalyzer.analyzeMatch(homeTeam, awayTeam);
+    const { report, telegramMessage } = await matchAnalyzer.analyzeMatch(homeTeam, awayTeam);
     await ctx.reply(telegramMessage, { parse_mode: 'Markdown' });
+
+    // Update session with new report
+    if (ctx.session) {
+        ctx.session.lastReport = report;
+    }
+
   } catch (error) {
     logger.error('Re-analysis failed', { error, homeTeam, awayTeam });
     await ctx.reply('❌ Erreur lors de la relance de l\'analyse.');
@@ -319,10 +329,7 @@ bot.action(/^details:(.+):(.+)$/, async (ctx) => {
   await ctx.reply(`⏳ Récupération des détails pour ${home} vs ${away}...`);
 
   try {
-     // Fetch deeper stats directly (using a new lighter method or reusing existing stats if cached)
-     // For now, we will trigger a text-based detailed summary using OpenAI
      const { telegramMessage } = await matchAnalyzer.analyzeMatchDocs(home, away);
-     
      await ctx.reply(telegramMessage, { parse_mode: 'Markdown' });
   } catch (error) {
      logger.error('Details retrieval failed', { error });
@@ -334,15 +341,41 @@ bot.action(/^details:(.+):(.+)$/, async (ctx) => {
 bot.action(/^bets:(.+):(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('💰 Paris suggérés');
   
-  await ctx.reply(
-    '💰 **Mode Paris Rapide**\n\n' +
-    'Cette fonctionnalité affichera uniquement :\n' +
-    '• Les paris recommandés\n' +
-    '• Les probabilités\n' +
-    '• Les niveaux de risque\n\n' +
-    '_Disponible dans une prochaine mise à jour_',
-    { parse_mode: 'Markdown' }
-  );
+  const session = ctx.session;
+  if (!session?.lastReport) {
+    await ctx.reply('⚠️ Veuillez d\'abord analyser un match pour voir les paris.');
+    return;
+  }
+
+  const report = session.lastReport;
+  const suggestions = report.suggestions;
+  const predictions = report.predictions;
+
+  let message = `💰 **MODE PARIS RAPIDE**\n${report.analysis.match.teamHome} vs ${report.analysis.match.teamAway}\n\n`;
+
+  // 1. Probabilities
+  message += `📊 **Probabilités**\n`;
+  message += `1️⃣ ${report.analysis.homeTeam.team.name}: **${predictions.homeWin}%**\n`;
+  message += `✖️ Nul: **${predictions.draw}%**\n`;
+  message += `2️⃣ ${report.analysis.awayTeam.team.name}: **${predictions.awayWin}%**\n\n`;
+
+  // 2. Suggestions
+  message += `🎯 **Meilleurs Paris**\n`;
+  
+  if (suggestions.length === 0) {
+      message += "Aucun pari suggéré pour ce match.\n\n";
+  } else {
+      suggestions.slice(0, 5).forEach((bet) => { // Top 5 bets
+        const riskEmoji = bet.riskLevel === 'low' ? '🟢' : bet.riskLevel === 'medium' ? '🟡' : '🔴';
+        message += `${riskEmoji} **${bet.selection}** (@${bet.odds || 'N/A'})\n`;
+        message += `   _${bet.explanation}_\n   Confiance: ${bet.confidence}%\n\n`;
+      });
+  }
+
+  // 3. Verdict
+  message += `🏆 **Verdict IA**: ${predictions.mostLikelyOutcome || 'Pas de verdict spécifique'}`;
+
+  await ctx.reply(message, { parse_mode: 'Markdown' });
 });
 
 // Correct teams button
@@ -385,12 +418,14 @@ bot.on(message('text'), async (ctx) => {
       const processingMsg = await ctx.reply('⏳ Analyse du match corrigé...');
       
       try {
-        const { telegramMessage } = await matchAnalyzer.analyzeMatch(homeTeam, awayTeam);
+        const { report, telegramMessage } = await matchAnalyzer.analyzeMatch(homeTeam, awayTeam);
         
         await ctx.telegram.deleteMessage(ctx.chat.id, processingMsg.message_id).catch(() => {});
         await ctx.reply(telegramMessage, { parse_mode: 'Markdown' });
         
         ctx.session.lastMatch = { home: homeTeam, away: awayTeam };
+        ctx.session.lastReport = report;
+
       } catch (error) {
         await ctx.telegram.deleteMessage(ctx.chat.id, processingMsg.message_id).catch(() => {});
         await ctx.reply('❌ Erreur lors de l\'analyse. Vérifie les noms des équipes.');

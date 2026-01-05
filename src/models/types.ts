@@ -282,6 +282,8 @@ export const PredictionsSchema = z.object({
     team: z.string(),
     probability: z.number(),
   })).optional(),
+  
+  mostLikelyOutcome: z.string().optional(),
 });
 
 export type Predictions = z.infer<typeof PredictionsSchema>;
