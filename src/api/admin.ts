@@ -8,16 +8,19 @@ import { stripeService } from '../services/stripeService.js';
 const app = express();
 
 // Middleware - Enable CORS for all origins
+// Middleware - Enable CORS for all origins
+app.use(cors({
+  origin: '*', // Allow all origins
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization'],
+  credentials: true // Enable if you need cookies/sessions, though with '*' wildcards browsers might block cookies. For public API '*' is fine.
+}));
+
+// Fallback manual CORS headers just in case
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-  
-  // Handle preflight requests
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-    return;
-  }
   next();
 });
 
