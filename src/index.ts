@@ -1,6 +1,8 @@
 import { logger } from './utils/logger.js';
 import { startBot } from './bot/index.js';
 import { config } from './config/index.js';
+import { connectDatabase } from './database/index.js';
+import { startAPI } from './api/admin.js';
 
 async function main() {
   logger.info('═══════════════════════════════════════════════════');
@@ -20,6 +22,16 @@ async function main() {
     process.exit(1);
   }
   
+  if (!config.MONGODB_URI) {
+    logger.error('❌ MONGODB_URI is required');
+    process.exit(1);
+  }
+  
+  if (!config.STRIPE_SECRET_KEY) {
+    logger.error('❌ STRIPE_SECRET_KEY is required');
+    process.exit(1);
+  }
+  
   // Log optional features
   if (config.FOOTBALL_DATA_API_KEY) {
     logger.info('✅ Football-Data.org API configured');
@@ -33,22 +45,20 @@ async function main() {
     logger.warn('⚠️ OpenWeatherMap API not configured - no weather data');
   }
   
-  // Start a simple HTTP server for Health Checks (Required for Render/Heroku Web Services)
-  // We run this in all environments to prevent Render/Heroku timeouts if NODE_ENV isn't set correctly
-  const PORT = process.env.PORT || 3000;
-  
+  // Connect to MongoDB
   try {
-    const http = await import('http');
-    const server = http.createServer((req, res) => {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('FootBot is running');
-    });
-    
-    server.listen(PORT, () => {
-      logger.info(`🏥 Health Check Server listening on port ${PORT}`);
-    });
-  } catch (e) {
-    logger.warn('Failed to start health check server', e);
+    await connectDatabase();
+  } catch (error) {
+    logger.error('Failed to connect to MongoDB', { error });
+    process.exit(1);
+  }
+  
+  // Start the API server (includes health check)
+  try {
+    startAPI();
+  } catch (error) {
+    logger.error('Failed to start API server', { error });
+    process.exit(1);
   }
 
   // Start the bot
@@ -58,6 +68,12 @@ async function main() {
     logger.error('Failed to start bot', { error });
     process.exit(1);
   }
+  
+  logger.info('═══════════════════════════════════════════════════');
+  logger.info('🚀 FootBot fully operational!');
+  logger.info(`📊 Admin Dashboard: ${config.FRONTEND_URL}/admin`);
+  logger.info(`💳 Stripe configured`);
+  logger.info('═══════════════════════════════════════════════════');
 }
 
 main().catch((error) => {

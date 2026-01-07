@@ -5,6 +5,9 @@ import { logger } from '../utils/logger.js';
 import { matchAnalyzer } from '../analysis/analyzer.js';
 import axios from 'axios';
 import { MatchReport } from '../models/types.js';
+import { quotaService } from '../services/quotaService.js';
+import { stripeService } from '../services/stripeService.js';
+import { User, getSettings, updateSettings } from '../database/index.js';
 
 // Custom context with session data
 interface BotContext extends Context {
@@ -44,10 +47,67 @@ bot.catch((err, ctx) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// Helper Functions
+// ═══════════════════════════════════════════════════════════════
+
+async function checkUserQuota(ctx: Context): Promise<boolean> {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return false;
+  
+  const result = await quotaService.checkQuota(telegramId);
+  
+  if (!result.allowed) {
+    await ctx.reply(result.reason || '❌ Quota épuisé', { parse_mode: 'Markdown' });
+    return false;
+  }
+  
+  return true;
+}
+
+async function deductUserMessage(
+  ctx: Context,
+  type: 'image' | 'text' | 'command',
+  matchInfo?: { homeTeam?: string; awayTeam?: string; competition?: string }
+) {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+  
+  await quotaService.deductMessage(telegramId, {
+    type,
+    homeTeam: matchInfo?.homeTeam,
+    awayTeam: matchInfo?.awayTeam,
+    competition: matchInfo?.competition,
+  });
+}
+
+function getQuotaStatusMessage(remainingFree: number, credits: number, costPerMessage: number): string {
+  const messagesWithCredits = Math.floor(credits / costPerMessage);
+  
+  if (remainingFree > 0) {
+    return `\n\n📊 _Messages gratuits restants: ${remainingFree}_`;
+  } else if (messagesWithCredits > 0) {
+    return `\n\n💰 _Crédits restants: ${messagesWithCredits} analyses_`;
+  }
+  return '';
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Commands
 // ═══════════════════════════════════════════════════════════════
 
 bot.command('start', async (ctx) => {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+  
+  // Register user
+  await quotaService.getOrCreateUser(telegramId, {
+    username: ctx.from?.username,
+    firstName: ctx.from?.first_name,
+    lastName: ctx.from?.last_name,
+  });
+  
+  const stats = await quotaService.getUserStats(telegramId);
+  
   const welcomeMessage = `
 ⚽ **Bienvenue sur FootBot !** 🤖
 
@@ -61,10 +121,15 @@ Je suis ton assistant IA pour l'analyse de matchs de football.
 **Commandes disponibles :**
 • /help - Afficher l'aide
 • /analyze \\[équipe1\\] vs \\[équipe2\\] - Analyse manuelle
+• /compte - Voir ton compte et crédits
+• /acheter - Acheter des crédits
+• /premium - Passer Premium
 
 **Compétitions supportées :**
 🇫🇷 Ligue 1 | 🏴󠁧󠁢󠁥󠁮󠁧󠁿 Premier League | 🇪🇸 La Liga
 🇩🇪 Bundesliga | 🇮🇹 Serie A | 🏆 Champions League
+
+🎁 **Tu as ${stats.remainingFreeMessages} analyses gratuites !**
 
 📸 **Envoie-moi un screenshot pour commencer !**
   `;
@@ -97,6 +162,11 @@ Je détecte automatiquement :
 • Confrontations directes
 • Enjeux du match
 
+**💳 Commandes compte :**
+• /compte - Voir tes crédits
+• /acheter - Acheter des analyses
+• /premium - Abonnement illimité
+
 **💡 Conseils :**
 • Utilise des screenshots clairs et lisibles
 • Les matchs pré-match donnent de meilleurs résultats
@@ -109,8 +179,521 @@ Les paris comportent des risques. Joue de manière responsable.
   await ctx.reply(helpMessage, { parse_mode: 'Markdown' });
 });
 
+// ═══════════════════════════════════════════════════════════════
+// Account & Payment Commands
+// ═══════════════════════════════════════════════════════════════
+
+bot.command('compte', async (ctx) => {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+  
+  const stats = await quotaService.getUserStats(telegramId);
+  const settings = await getSettings();
+  
+  let premiumStatus = '❌ Non abonné';
+  if (stats.isPremium && stats.premiumUntil) {
+    const daysLeft = Math.ceil((stats.premiumUntil.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+    premiumStatus = `👑 Premium (${daysLeft} jours restants)`;
+  }
+  
+  const message = `
+👤 **Mon Compte FootBot**
+
+📊 **Statistiques :**
+• Analyses effectuées : ${stats.totalMessages}
+• Dépenses totales : ${(stats.totalSpent / 100).toFixed(2)}€
+
+🎁 **Messages gratuits :**
+• Restants : ${stats.remainingFreeMessages}/${stats.user.freeMessagesLimit}
+
+💰 **Crédits :**
+• Solde : ${stats.remainingCredits} centimes
+• Équivalent : ${stats.messagesWithCredits} analyses
+• Coût par analyse : ${settings.costPerMessage} centimes
+
+👑 **Premium :**
+• Statut : ${premiumStatus}
+
+📦 Utilise /acheter pour recharger ton compte !
+  `;
+  
+  await ctx.reply(message, { parse_mode: 'Markdown' });
+});
+
+bot.command('acheter', async (ctx) => {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const loadingMsg = await ctx.reply('🔄 Chargement des offres personnalisées...', { parse_mode: 'Markdown' });
+
+  try {
+    const packages = await stripeService.getCreditPackages();
+    
+    // Pre-generate payment links for all packages in parallel
+    const packagesWithLinks = await Promise.all(packages.map(async (pkg) => {
+      const result = await stripeService.createCreditsCheckout(telegramId, pkg.id);
+      return { ...pkg, paymentUrl: result.paymentUrl };
+    }));
+    
+    let message = `
+💳 **Acheter des analyses**
+
+Choisis un pack de crédits :
+
+`;
+    
+    packages.forEach(pkg => {
+      const popularBadge = pkg.popular ? ' ⭐ Populaire' : '';
+      message += `**+${pkg.credits} Analyses** - ${(pkg.price / 100).toFixed(2)}€${popularBadge}\n\n`;
+    });
+    
+    
+    const buttons = packagesWithLinks.map(pkg => {
+      const label = `+${pkg.credits} Analyses - ${(pkg.price / 100).toFixed(2)}€`;
+      // Must use standard URL button because Stripe blocks embedding in Web Apps
+      return pkg.paymentUrl 
+        ? [Markup.button.url(label, pkg.paymentUrl)]
+        : [Markup.button.callback(label, `buy:${pkg.id}`)];
+    });
+    
+    buttons.push([Markup.button.callback('👑 Passer Premium', 'premium_info')]);
+    
+    // Delete loading message and send offers
+    if (ctx.chat) {
+      await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
+    }
+    await ctx.reply(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(buttons),
+    });
+
+  } catch (error) {
+    if (ctx.chat) {
+      await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
+    }
+    await ctx.reply('❌ Erreur lors du chargement des offres. Réessaie plus tard.');
+  }
+});
+
+bot.command('premium', async (ctx) => {
+  const settings = await getSettings();
+  
+  if (!settings.premiumEnabled) {
+    await ctx.reply('❌ Les abonnements Premium sont actuellement désactivés.');
+    return;
+  }
+  
+  const monthlyPrice = (settings.premiumMonthlyPrice / 100).toFixed(2);
+  const yearlyPrice = (settings.premiumYearlyPrice / 100).toFixed(2);
+  const yearlySavings = ((settings.premiumMonthlyPrice * 12 - settings.premiumYearlyPrice) / 100).toFixed(2);
+  
+  const message = `
+👑 **FootBot Premium**
+
+Analyses illimitées, sans compter tes crédits !
+
+**📅 Mensuel : ${monthlyPrice}€/mois**
+• Analyses illimitées
+• Support prioritaire
+• Accès aux nouvelles fonctionnalités
+
+**📅 Annuel : ${yearlyPrice}€/an**
+• Tout le mensuel
+• Économise ${yearlySavings}€
+
+_Clique sur un bouton pour t'abonner :_
+  `;
+  
+  await ctx.reply(message, {
+    parse_mode: 'Markdown',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback(`📅 Mensuel - ${monthlyPrice}€`, 'premium:monthly')],
+      [Markup.button.callback(`📅 Annuel - ${yearlyPrice}€ (-${yearlySavings}€)`, 'premium:yearly')],
+    ]),
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Payment Callbacks
+// ═══════════════════════════════════════════════════════════════
+
+bot.action(/^buy:(.+)$/, async (ctx) => {
+  const packageId = ctx.match[1];
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+  
+  await ctx.answerCbQuery('💳 Création du paiement...');
+  
+  const result = await stripeService.createCreditsCheckout(telegramId, packageId);
+  
+  if (result.success && result.paymentUrl) {
+    // Muse use standard URL button
+    await ctx.reply(
+      `💳 **Paiement**\n\nClique sur le bouton ci-dessous pour finaliser ton achat :`,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.url('💳 Payer maintenant', result.paymentUrl)],
+        ]),
+      }
+    );
+  } else {
+    await ctx.reply(`❌ ${result.error || 'Erreur lors de la création du paiement'}`);
+  }
+});
+
+bot.action(/^premium:(.+)$/, async (ctx) => {
+  const plan = ctx.match[1] as 'monthly' | 'yearly';
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+  
+  await ctx.answerCbQuery('💳 Création du paiement...');
+  
+  const result = await stripeService.createPremiumCheckout(telegramId, plan);
+  
+  if (result.success && result.paymentUrl) {
+    await ctx.reply(
+      `👑 **Premium ${plan === 'monthly' ? 'Mensuel' : 'Annuel'}**\n\nClique sur le bouton ci-dessous pour finaliser ton abonnement :`,
+      { 
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.url('👑 S\'abonner maintenant', result.paymentUrl)],
+        ]),
+      }
+    );
+  } else {
+    await ctx.reply(`❌ ${result.error || 'Erreur lors de la création du paiement'}`);
+  }
+});
+
+bot.action('premium_info', async (ctx) => {
+  await ctx.answerCbQuery();
+  
+  // Just trigger the premium info message directly
+  const settings = await getSettings();
+  
+  if (!settings.premiumEnabled) {
+    await ctx.reply('❌ Les abonnements Premium sont actuellement désactivés.');
+    return;
+  }
+  
+  const monthlyPrice = (settings.premiumMonthlyPrice / 100).toFixed(2);
+  const yearlyPrice = (settings.premiumYearlyPrice / 100).toFixed(2);
+  const yearlySavings = ((settings.premiumMonthlyPrice * 12 - settings.premiumYearlyPrice) / 100).toFixed(2);
+  
+  const message = `
+👑 **FootBot Premium**
+
+Analyses illimitées, sans compter tes crédits !
+
+**📅 Mensuel : ${monthlyPrice}€/mois**
+• Analyses illimitées
+• Support prioritaire
+• Accès aux nouvelles fonctionnalités
+
+**📅 Annuel : ${yearlyPrice}€/an**
+• Tout le mensuel
+• Économise ${yearlySavings}€
+
+_Clique sur un bouton pour t'abonner :_
+  `;
+  
+  // Pre-generate checkout sessions
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+  
+  // Show loading while generating links
+  const loadingMsg = await ctx.reply('🔄 Chargement des offres Premium...', { parse_mode: 'Markdown' });
+
+  try {
+    const [monthlyLink, yearlyLink] = await Promise.all([
+      stripeService.createPremiumCheckout(telegramId, 'monthly'),
+      stripeService.createPremiumCheckout(telegramId, 'yearly')
+    ]);
+
+    // Delete loading message
+    if (ctx.chat) {
+      await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
+    }
+    
+    await ctx.reply(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard([
+        [
+          monthlyLink.success && monthlyLink.paymentUrl 
+            ? Markup.button.url(`📅 Mensuel - ${monthlyPrice}€`, monthlyLink.paymentUrl)
+            : Markup.button.callback(`📅 Mensuel - ${monthlyPrice}€`, 'premium:monthly')
+        ],
+        [
+          yearlyLink.success && yearlyLink.paymentUrl
+            ? Markup.button.url(`📅 Annuel - ${yearlyPrice}€ (-${yearlySavings}€)`, yearlyLink.paymentUrl)
+            : Markup.button.callback(`📅 Annuel - ${yearlyPrice}€ (-${yearlySavings}€)`, 'premium:yearly')
+        ],
+      ]),
+    });
+  } catch (error) {
+    if (ctx.chat) {
+      await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
+    }
+    await ctx.reply('❌ Erreur lors du chargement des offres Premium.');
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Admin Commands (Telegram)
+// ═══════════════════════════════════════════════════════════════
+
+bot.command('admin', async (ctx) => {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+  
+  const user = await User.findOne({ telegramId });
+  if (!user?.isAdmin) {
+    await ctx.reply('❌ Accès refusé');
+    return;
+  }
+  
+  const message = `
+🔧 **Panneau Admin FootBot**
+
+**Commandes disponibles :**
+• /admin\\_stats - Statistiques globales
+• /admin\\_user \\[telegramId\\] - Infos utilisateur
+• /admin\\_credits \\[telegramId\\] \\[amount\\] - Ajouter crédits
+• /admin\\_ban \\[telegramId\\] - Bannir utilisateur
+• /admin\\_unban \\[telegramId\\] - Débannir
+• /admin\\_maintenance - Toggle maintenance
+• /admin\\_setfree \\[nombre\\] - Changer limite gratuite
+
+🖥️ Dashboard web : ${config.FRONTEND_URL}/admin
+  `;
+  
+  await ctx.reply(message, { parse_mode: 'Markdown' });
+});
+
+bot.command('admin_stats', async (ctx) => {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+  
+  const user = await User.findOne({ telegramId });
+  if (!user?.isAdmin) {
+    await ctx.reply('❌ Accès refusé');
+    return;
+  }
+  
+  const [totalUsers, totalMessages, revenueResult] = await Promise.all([
+    User.countDocuments(),
+    (await import('../database/models/Message.js')).Message.countDocuments(),
+    (await import('../database/models/Payment.js')).Payment.aggregate([
+      { $match: { status: 'completed' } },
+      { $group: { _id: null, total: { $sum: '$amount' } } },
+    ]),
+  ]);
+  
+  const revenue = revenueResult[0]?.total || 0;
+  
+  const message = `
+📊 **Statistiques FootBot**
+
+👥 Utilisateurs : ${totalUsers}
+📨 Messages : ${totalMessages}
+💰 Revenus : ${(revenue / 100).toFixed(2)}€
+  `;
+  
+  await ctx.reply(message, { parse_mode: 'Markdown' });
+});
+
+bot.command('admin_user', async (ctx) => {
+  const adminId = ctx.from?.id;
+  if (!adminId) return;
+  
+  const admin = await User.findOne({ telegramId: adminId });
+  if (!admin?.isAdmin) {
+    await ctx.reply('❌ Accès refusé');
+    return;
+  }
+  
+  const args = ctx.message.text.split(' ');
+  if (args.length < 2) {
+    await ctx.reply('Usage: /admin\\_user [telegramId]', { parse_mode: 'Markdown' });
+    return;
+  }
+  
+  const targetId = parseInt(args[1]);
+  const user = await User.findOne({ telegramId: targetId });
+  
+  if (!user) {
+    await ctx.reply('❌ Utilisateur non trouvé');
+    return;
+  }
+  
+  const message = `
+👤 **Utilisateur ${user.telegramId}**
+
+📝 Username : @${user.username || 'N/A'}
+👤 Nom : ${user.firstName || ''} ${user.lastName || ''}
+
+📊 **Statistiques :**
+• Messages : ${user.totalMessagesSent}
+• Gratuits utilisés : ${user.freeMessagesUsed}/${user.freeMessagesLimit}
+• Crédits : ${user.credits}
+• Dépenses : ${(user.totalSpent / 100).toFixed(2)}€
+
+👑 Premium : ${user.isPremium ? 'Oui' : 'Non'}
+🚫 Banni : ${user.isBanned ? 'Oui' : 'Non'}
+⚙️ Admin : ${user.isAdmin ? 'Oui' : 'Non'}
+
+📅 Inscrit : ${user.createdAt.toLocaleDateString()}
+🕐 Dernière activité : ${user.lastActiveAt.toLocaleDateString()}
+  `;
+  
+  await ctx.reply(message, { parse_mode: 'Markdown' });
+});
+
+bot.command('admin_credits', async (ctx) => {
+  const adminId = ctx.from?.id;
+  if (!adminId) return;
+  
+  const admin = await User.findOne({ telegramId: adminId });
+  if (!admin?.isAdmin) {
+    await ctx.reply('❌ Accès refusé');
+    return;
+  }
+  
+  const args = ctx.message.text.split(' ');
+  if (args.length < 3) {
+    await ctx.reply('Usage: /admin\\_credits [telegramId] [amount]', { parse_mode: 'Markdown' });
+    return;
+  }
+  
+  const targetId = parseInt(args[1]);
+  const amount = parseFloat(args[2]);
+  
+  const user = await User.findOne({ telegramId: targetId });
+  if (!user) {
+    await ctx.reply('❌ Utilisateur non trouvé');
+    return;
+  }
+  
+  user.credits += amount;
+  await user.save();
+  
+  await ctx.reply(`✅ ${amount} crédits ajoutés à l'utilisateur ${targetId}. Nouveau solde : ${user.credits}`);
+});
+
+bot.command('admin_ban', async (ctx) => {
+  const adminId = ctx.from?.id;
+  if (!adminId) return;
+  
+  const admin = await User.findOne({ telegramId: adminId });
+  if (!admin?.isAdmin) {
+    await ctx.reply('❌ Accès refusé');
+    return;
+  }
+  
+  const args = ctx.message.text.split(' ');
+  if (args.length < 2) {
+    await ctx.reply('Usage: /admin\\_ban [telegramId]', { parse_mode: 'Markdown' });
+    return;
+  }
+  
+  const targetId = parseInt(args[1]);
+  const reason = args.slice(2).join(' ') || 'Aucune raison spécifiée';
+  
+  const user = await User.findOneAndUpdate(
+    { telegramId: targetId },
+    { isBanned: true, banReason: reason },
+    { new: true }
+  );
+  
+  if (!user) {
+    await ctx.reply('❌ Utilisateur non trouvé');
+    return;
+  }
+  
+  await ctx.reply(`🚫 Utilisateur ${targetId} banni. Raison : ${reason}`);
+});
+
+bot.command('admin_unban', async (ctx) => {
+  const adminId = ctx.from?.id;
+  if (!adminId) return;
+  
+  const admin = await User.findOne({ telegramId: adminId });
+  if (!admin?.isAdmin) {
+    await ctx.reply('❌ Accès refusé');
+    return;
+  }
+  
+  const args = ctx.message.text.split(' ');
+  if (args.length < 2) {
+    await ctx.reply('Usage: /admin\\_unban [telegramId]', { parse_mode: 'Markdown' });
+    return;
+  }
+  
+  const targetId = parseInt(args[1]);
+  
+  const user = await User.findOneAndUpdate(
+    { telegramId: targetId },
+    { isBanned: false, banReason: undefined },
+    { new: true }
+  );
+  
+  if (!user) {
+    await ctx.reply('❌ Utilisateur non trouvé');
+    return;
+  }
+  
+  await ctx.reply(`✅ Utilisateur ${targetId} débanni`);
+});
+
+bot.command('admin_maintenance', async (ctx) => {
+  const adminId = ctx.from?.id;
+  if (!adminId) return;
+  
+  const admin = await User.findOne({ telegramId: adminId });
+  if (!admin?.isAdmin) {
+    await ctx.reply('❌ Accès refusé');
+    return;
+  }
+  
+  const settings = await getSettings();
+  const newMode = !settings.maintenanceMode;
+  await updateSettings({ maintenanceMode: newMode });
+  
+  await ctx.reply(`🔧 Mode maintenance : ${newMode ? '✅ Activé' : '❌ Désactivé'}`);
+});
+
+bot.command('admin_setfree', async (ctx) => {
+  const adminId = ctx.from?.id;
+  if (!adminId) return;
+  
+  const admin = await User.findOne({ telegramId: adminId });
+  if (!admin?.isAdmin) {
+    await ctx.reply('❌ Accès refusé');
+    return;
+  }
+  
+  const args = ctx.message.text.split(' ');
+  if (args.length < 2) {
+    await ctx.reply('Usage: /admin\\_setfree [nombre]', { parse_mode: 'Markdown' });
+    return;
+  }
+  
+  const limit = parseInt(args[1]);
+  await updateSettings({ freeMessagesLimit: limit });
+  
+  await ctx.reply(`✅ Limite de messages gratuits changée à ${limit}`);
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Analyze Command
+// ═══════════════════════════════════════════════════════════════
+
 bot.command('analyze', async (ctx) => {
   const text = ctx.message.text.replace('/analyze', '').trim();
+  const telegramId = ctx.from?.id;
+  
+  if (!telegramId) return;
   
   if (!text) {
     await ctx.reply(
@@ -130,6 +713,9 @@ bot.command('analyze', async (ctx) => {
     return;
   }
   
+  // Check quota
+  if (!(await checkUserQuota(ctx))) return;
+  
   const homeTeam = vsMatch[1].trim();
   const awayTeam = vsMatch[2].trim();
   
@@ -142,11 +728,17 @@ bot.command('analyze', async (ctx) => {
   try {
     const { report, telegramMessage } = await matchAnalyzer.analyzeMatch(homeTeam, awayTeam);
     
+    // Deduct message
+    await deductUserMessage(ctx, 'command', { homeTeam, awayTeam });
+    const stats = await quotaService.getUserStats(telegramId);
+    const settings = await getSettings();
+    const quotaStatus = getQuotaStatusMessage(stats.remainingFreeMessages, stats.remainingCredits, settings.costPerMessage);
+    
     // Delete processing message
     await ctx.telegram.deleteMessage(ctx.chat.id, processingMsg.message_id).catch(() => {});
     
     // Send analysis result
-    await ctx.reply(telegramMessage, {
+    await ctx.reply(telegramMessage + quotaStatus, {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard([
         [
@@ -181,7 +773,13 @@ bot.command('analyze', async (ctx) => {
 // ═══════════════════════════════════════════════════════════════
 
 bot.on(message('photo'), async (ctx) => {
-  logger.info('Photo received', { userId: ctx.from?.id, chatId: ctx.chat.id });
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+  
+  logger.info('Photo received', { userId: telegramId, chatId: ctx.chat.id });
+  
+  // Check quota BEFORE processing
+  if (!(await checkUserQuota(ctx))) return;
   
   // Get the highest resolution photo
   const photos = ctx.message.photo;
@@ -219,6 +817,17 @@ bot.on(message('photo'), async (ctx) => {
     // Analyze the image
     const { report, telegramMessage, matchCandidate } = await matchAnalyzer.analyzeFromImage(imageBuffer, mimeType);
     
+    // Deduct message AFTER successful analysis
+    await deductUserMessage(ctx, 'image', {
+      homeTeam: matchCandidate.teamHome,
+      awayTeam: matchCandidate.teamAway,
+      competition: matchCandidate.competition || undefined,
+    });
+    
+    const stats = await quotaService.getUserStats(telegramId);
+    const settings = await getSettings();
+    const quotaStatus = getQuotaStatusMessage(stats.remainingFreeMessages, stats.remainingCredits, settings.costPerMessage);
+    
     // Delete processing message
     await ctx.telegram.deleteMessage(ctx.chat.id, processingMsg.message_id).catch(() => {});
     
@@ -245,7 +854,7 @@ bot.on(message('photo'), async (ctx) => {
     }
     
     // Send the analysis
-    await ctx.reply(message, {
+    await ctx.reply(message + quotaStatus, {
       parse_mode: 'Markdown',
       ...keyboard,
     });
@@ -293,6 +902,17 @@ bot.action(/^reanalyze:(.+):(.+)$/, async (ctx) => {
   const match = ctx.match;
   const homeTeam = match[1];
   const awayTeam = match[2];
+  const telegramId = ctx.from?.id;
+  
+  if (!telegramId) return;
+  
+  // Check quota
+  const quotaCheck = await quotaService.checkQuota(telegramId);
+  if (!quotaCheck.allowed) {
+    await ctx.answerCbQuery('❌ Quota épuisé');
+    await ctx.reply(quotaCheck.reason || '❌ Quota épuisé', { parse_mode: 'Markdown' });
+    return;
+  }
   
   await ctx.answerCbQuery('🔄 Relance de l\'analyse...');
   
@@ -300,7 +920,14 @@ bot.action(/^reanalyze:(.+):(.+)$/, async (ctx) => {
   
   try {
     const { report, telegramMessage } = await matchAnalyzer.analyzeMatch(homeTeam, awayTeam);
-    await ctx.reply(telegramMessage, { parse_mode: 'Markdown' });
+    
+    // Deduct message
+    await deductUserMessage({ from: { id: telegramId } } as Context, 'command', { homeTeam, awayTeam });
+    const stats = await quotaService.getUserStats(telegramId);
+    const settings = await getSettings();
+    const quotaStatus = getQuotaStatusMessage(stats.remainingFreeMessages, stats.remainingCredits, settings.costPerMessage);
+    
+    await ctx.reply(telegramMessage + quotaStatus, { parse_mode: 'Markdown' });
 
     // Update session with new report
     if (ctx.session) {
@@ -313,7 +940,7 @@ bot.action(/^reanalyze:(.+):(.+)$/, async (ctx) => {
   }
 });
 
-// Details button
+// Details button (free, doesn't cost)
 bot.action(/^details:(.+):(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('📊 Voir les détails complets');
   
@@ -337,7 +964,7 @@ bot.action(/^details:(.+):(.+)$/, async (ctx) => {
   }
 });
 
-// Bets only button
+// Bets only button (free, doesn't cost)
 bot.action(/^bets:(.+):(.+)$/, async (ctx) => {
   await ctx.answerCbQuery('💰 Paris suggérés');
   
@@ -401,6 +1028,9 @@ bot.action(/^correct:(.+):(.+)$/, async (ctx) => {
 
 bot.on(message('text'), async (ctx) => {
   const text = ctx.message.text;
+  const telegramId = ctx.from?.id;
+  
+  if (!telegramId) return;
   
   // Skip if it's a command
   if (text.startsWith('/')) return;
@@ -412,6 +1042,9 @@ bot.on(message('text'), async (ctx) => {
     if (vsMatch) {
       ctx.session.awaitingCorrection = false;
       
+      // Check quota
+      if (!(await checkUserQuota(ctx))) return;
+      
       const homeTeam = vsMatch[1].trim();
       const awayTeam = vsMatch[2].trim();
       
@@ -420,8 +1053,14 @@ bot.on(message('text'), async (ctx) => {
       try {
         const { report, telegramMessage } = await matchAnalyzer.analyzeMatch(homeTeam, awayTeam);
         
+        // Deduct message
+        await deductUserMessage(ctx, 'text', { homeTeam, awayTeam });
+        const stats = await quotaService.getUserStats(telegramId);
+        const settings = await getSettings();
+        const quotaStatus = getQuotaStatusMessage(stats.remainingFreeMessages, stats.remainingCredits, settings.costPerMessage);
+        
         await ctx.telegram.deleteMessage(ctx.chat.id, processingMsg.message_id).catch(() => {});
-        await ctx.reply(telegramMessage, { parse_mode: 'Markdown' });
+        await ctx.reply(telegramMessage + quotaStatus, { parse_mode: 'Markdown' });
         
         ctx.session.lastMatch = { home: homeTeam, away: awayTeam };
         ctx.session.lastReport = report;
@@ -459,6 +1098,9 @@ export async function startBot() {
     { command: 'start', description: 'Démarrer le bot' },
     { command: 'help', description: 'Afficher l\'aide' },
     { command: 'analyze', description: 'Analyser un match manuellement' },
+    { command: 'compte', description: 'Voir mon compte' },
+    { command: 'acheter', description: 'Acheter des crédits' },
+    { command: 'premium', description: 'Passer Premium' },
   ]);
   
   // Start polling
