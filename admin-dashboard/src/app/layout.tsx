@@ -8,8 +8,8 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "FootBot Admin Dashboard",
-  description: "Panneau d'administration FootBot - Gérez vos utilisateurs, paiements et paramètres",
+  title: "Cotybet Admin Dashboard",
+  description: "Panneau d'administration Cotybet - Gérez vos utilisateurs, paiements et paramètres",
 };
 
 export default function RootLayout({

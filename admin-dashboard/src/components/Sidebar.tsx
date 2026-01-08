@@ -26,7 +26,7 @@ export default function Sidebar() {
       <div className="p-6 border-b border-[#334155]">
         <div className="flex items-center gap-3">
           <span className="text-3xl">⚽</span>
-          <span className="text-xl font-bold text-white">FootBot Admin</span>
+          <span className="text-xl font-bold text-white">Cotybet Admin</span>
         </div>
       </div>
 

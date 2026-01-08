@@ -85,7 +85,7 @@ export default function DashboardPage() {
       <div>
         <h1 className="text-2xl font-bold text-white mb-2">Vue d&apos;ensemble</h1>
         <p className="text-slate-400">
-          Bienvenue sur le tableau de bord FootBot Admin
+          Bienvenue sur le tableau de bord Cotybet Admin
         </p>
       </div>
 

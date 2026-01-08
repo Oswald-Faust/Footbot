@@ -1,15 +1,138 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getSettings, updateSettings, Settings } from "@/lib/api";
+import { getSettings, updateSettings, Settings, getInvites, createInvite, deleteInvite, InviteCode } from "@/lib/api";
 import { Card, Button, Input } from "@/components/ui";
-import { Loader2, Save, AlertTriangle, Lock, Unlock, Trash2, Plus } from "lucide-react";
+import { Loader2, Save, AlertTriangle, Lock, Unlock, Trash2, Plus, RefreshCw, Copy } from "lucide-react";
+
+function InviteCodesManager() {
+  const [invites, setInvites] = useState<InviteCode[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [newCode, setNewCode] = useState("");
+  const [isOneTime, setIsOneTime] = useState(true);
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    loadInvites();
+  }, []);
+
+  const loadInvites = async () => {
+    setLoading(true);
+    try {
+      const { invites, legacyCodes } = await getInvites();
+      setInvites([...invites, ...legacyCodes]);
+    } catch (error) {
+      console.error("Error loading invites", error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCreate = async () => {
+    if (!newCode) return;
+    setCreating(true);
+    try {
+      const invite = await createInvite(newCode, isOneTime ? 'one_time' : 'unlimited');
+      setInvites([invite, ...invites]);
+      setNewCode("");
+    } catch (error) {
+      alert("Impossible de créer le code (doublon ?)");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleDelete = async (code: string) => {
+    if (!confirm("Supprimer ce code ?")) return;
+    try {
+      await deleteInvite(code);
+      setInvites(invites.filter(i => i.code !== code));
+    } catch (error) {
+      alert("Erreur lors de la suppression");
+    }
+  };
+
+  if (loading) return <Loader2 className="animate-spin text-slate-400" size={20} />;
+
+  return (
+    <div className="space-y-4">
+      <h3 className="text-sm font-semibold text-white">Codes d&apos;invitation</h3>
+      
+      <div className="flex flex-col gap-3 bg-[#1e293b] p-3 rounded-lg border border-[#334155]">
+        <Input
+          placeholder="Nouveau code (ex: VIP2024)"
+          value={newCode}
+          onChange={(e) => setNewCode(e.target.value)}
+        />
+        <div className="flex items-center justify-between">
+          <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-300">
+            <input 
+              type="checkbox" 
+              checked={isOneTime}
+              onChange={(e) => setIsOneTime(e.target.checked)}
+              className="w-4 h-4 rounded border-[#334155] bg-[#0f172a] text-emerald-500 focus:ring-emerald-500"
+            />
+            Usage unique
+          </label>
+          <Button onClick={handleCreate} isLoading={creating} disabled={!newCode} size="sm">
+            <Plus size={16} /> Ajouter
+          </Button>
+        </div>
+      </div>
+
+      <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+        {invites.length === 0 && (
+          <p className="text-sm text-slate-500 italic">Aucun code actif</p>
+        )}
+        {invites.map((invite) => (
+          <div key={invite._id || invite.code} className={`p-3 rounded border space-y-2 ${invite.isUsed ? 'bg-red-950/20 border-red-900/30' : 'bg-[#0f172a] border-[#334155]'}`}>
+            <div className="flex items-center justify-between">
+              <div>
+                <code className={`font-bold font-mono text-lg ${invite.isUsed ? 'text-slate-500 line-through' : 'text-emerald-400'}`}>
+                  {invite.code}
+                </code>
+                <div className="flex items-center gap-2 mt-1">
+                  <span className={`text-[10px] uppercase font-bold px-1.5 py-0.5 rounded ${invite.type === 'one_time' ? 'bg-amber-500/10 text-amber-400' : 'bg-blue-500/10 text-blue-400'}`}>
+                    {invite.type === 'one_time' ? 'Usage Unique' : 'Illimité'}
+                  </span>
+                  {invite.isLegacy && <span className="text-[10px] bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded">Legacy</span>}
+                  {invite.isUsed && <span className="text-[10px] bg-red-500/10 text-red-400 px-1.5 py-0.5 rounded">Utilisé</span>}
+                </div>
+              </div>
+              
+              <button 
+                onClick={() => handleDelete(invite.code)}
+                className="text-slate-500 hover:text-red-400 transition-colors p-1"
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+            
+            {!invite.isUsed && (
+              <div className="flex items-center gap-2 bg-[#1e293b] p-2 rounded text-xs text-slate-300">
+                <span className="truncate flex-1">t.me/footologuebot?start={invite.code}</span>
+                <button 
+                  onClick={() => {
+                    navigator.clipboard.writeText(`https://t.me/footologuebot?start=${invite.code}`);
+                    // alert("Lien copié !");
+                  }}
+                  className="text-emerald-500 hover:text-emerald-400 font-medium whitespace-nowrap flex items-center gap-1"
+                >
+                  <Copy size={12} /> Copier
+                </button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState<string | null>(null);
-  const [newInviteCode, setNewInviteCode] = useState("");
 
   useEffect(() => {
     loadSettings();
@@ -38,19 +161,6 @@ export default function SettingsPage() {
     } finally {
       setIsSaving(null);
     }
-  };
-
-  const addInviteCode = () => {
-    if (!newInviteCode.trim() || !settings) return;
-    const codes = [...(settings.accessCodes || []), newInviteCode.trim()];
-    handleSave("access", { accessCodes: codes });
-    setNewInviteCode("");
-  };
-
-  const removeInviteCode = (code: string) => {
-    if (!settings) return;
-    const codes = settings.accessCodes.filter((c) => c !== code);
-    handleSave("access", { accessCodes: codes });
   };
 
   const updatePackage = (index: number, field: string, value: string | number | boolean) => {
@@ -89,7 +199,7 @@ export default function SettingsPage() {
       {/* Settings Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         
-        {/* Access Control - NEW */}
+        {/* Access Control - UPDATED */}
         <Card title="🔒 Accès & Sécurité">
           <div className="space-y-6">
             {/* Private Mode Toggle */}
@@ -108,58 +218,12 @@ export default function SettingsPage() {
                   Mode Bot Privé
                 </span>
               </label>
-              <p className="text-sm text-slate-400 ml-8">
-                Si activé, le bot ne sera accessible qu&apos;aux utilisateurs autorisés ou ceux disposant d&apos;un code d&apos;invitation valide.
-              </p>
             </div>
 
             {/* Invite Codes */}
             {settings.privateMode && (
               <div className="space-y-4 border-t border-[#334155] pt-4">
-                <h3 className="text-sm font-semibold text-white">Codes d&apos;invitation</h3>
-                
-                <div className="flex gap-2">
-                  <Input
-                    placeholder="Nouveau code"
-                    value={newInviteCode}
-                    onChange={(e) => setNewInviteCode(e.target.value)}
-                    className="flex-1"
-                  />
-                  <Button onClick={addInviteCode} isLoading={isSaving === "access"} disabled={!newInviteCode}>
-                    <Plus size={16} />
-                  </Button>
-                </div>
-
-                <div className="space-y-2 max-h-60 overflow-y-auto">
-                  {settings.accessCodes?.length === 0 && (
-                    <p className="text-sm text-slate-500 italic">Aucun code actif</p>
-                  )}
-                  {settings.accessCodes?.map((code) => (
-                    <div key={code} className="bg-[#0f172a] p-3 rounded border border-[#334155] space-y-2">
-                      <div className="flex items-center justify-between">
-                        <code className="text-emerald-400 font-bold font-mono text-lg">{code}</code>
-                        <button 
-                          onClick={() => removeInviteCode(code)}
-                          className="text-slate-400 hover:text-red-400 transition-colors"
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
-                      <div className="flex items-center gap-2 bg-[#1e293b] p-2 rounded text-xs text-slate-300">
-                        <span className="truncate flex-1">https://t.me/footologuebot?start={code}</span>
-                        <button 
-                          onClick={() => {
-                            navigator.clipboard.writeText(`https://t.me/footologuebot?start=${code}`);
-                            alert("Lien copié !");
-                          }}
-                          className="text-emerald-500 hover:text-emerald-400 font-medium whitespace-nowrap"
-                        >
-                          Copier le lien
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                <InviteCodesManager />
               </div>
             )}
           </div>

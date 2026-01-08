@@ -151,3 +151,37 @@ export async function updateSettings(updates: Partial<Settings>) {
     body: JSON.stringify(updates),
   });
 }
+
+// Invite Codes
+export interface InviteCode {
+  _id: string;
+  code: string;
+  type: 'unlimited' | 'one_time';
+  isUsed: boolean;
+  usedBy?: number;
+  isLegacy?: boolean;
+  createdAt: string;
+}
+
+export interface InvitesResponse {
+  invites: InviteCode[];
+  legacyCodes: InviteCode[];
+}
+
+export async function getInvites(): Promise<InvitesResponse> {
+  return apiRequest('/api/invites');
+}
+
+export async function createInvite(code: string, type: 'unlimited' | 'one_time'): Promise<InviteCode> {
+  return apiRequest('/api/invites', {
+    method: 'POST',
+    body: JSON.stringify({ code, type }),
+  });
+}
+
+export async function deleteInvite(code: string) {
+  return apiRequest<{ success: boolean; deleted: InviteCode }>(
+    `/api/invites/${code}`,
+    { method: 'DELETE' }
+  );
+}
