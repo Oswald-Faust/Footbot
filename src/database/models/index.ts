@@ -9,3 +9,6 @@ export type { IPayment } from './Payment.js';
 
 export { Settings, getSettings, updateSettings } from './Settings.js';
 export type { ISettings } from './Settings.js';
+
+export { InviteCode } from './InviteCode.js';
+export type { IInviteCode } from './InviteCode.js';

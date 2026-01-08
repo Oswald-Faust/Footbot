@@ -7,7 +7,7 @@ import axios from 'axios';
 import { MatchReport } from '../models/types.js';
 import { quotaService } from '../services/quotaService.js';
 import { stripeService } from '../services/stripeService.js';
-import { User, getSettings, updateSettings } from '../database/index.js';
+import { User, getSettings, updateSettings, InviteCode } from '../database/index.js';
 
 // Custom context with session data
 interface BotContext extends Context {
@@ -152,13 +152,38 @@ bot.command('code', async (ctx) => {
     return;
   }
 
-  if (settings.accessCodes.includes(code)) {
+  // Check InviteCode model
+  const invite = await InviteCode.findOne({ code });
+
+  if (invite) {
+    // Check if used
+    if (invite.type === 'one_time' && invite.isUsed) {
+      await ctx.reply('❌ Ce code d\'invitation a déjà été utilisé.');
+      return;
+    }
+
+    // Mark as used if one-time
+    if (invite.type === 'one_time') {
+      invite.isUsed = true;
+      invite.usedBy = telegramId;
+      invite.usedAt = new Date();
+      await invite.save();
+    }
+
     // Authorize user
     user.isAuthorized = true;
     await user.save();
-    await ctx.reply('✅ Accès autorisé ! Bienvenue sur FootBot ⚽\n\nTapez /start pour commencer ou envoyez directement une photo de match !');
+    await ctx.reply('✅ Accès autorisé ! Bienvenue sur Cotybet ⚽\n\nTapez /start pour commencer ou envoyez directement une photo de match !');
   } else {
-    await ctx.reply('❌ Code invalide.');
+    // Fallback to old settings method (for backward compatibility during migration) or fail
+    if (settings.accessCodes.includes(code)) {
+       // Authorize user (legacy)
+      user.isAuthorized = true;
+      await user.save();
+      await ctx.reply('✅ Accès autorisé ! Bienvenue sur FootBot ⚽');
+    } else {
+      await ctx.reply('❌ Code invalide.');
+    }
   }
 });
 
@@ -180,11 +205,35 @@ bot.command('start', async (ctx) => {
   
   // Handle Private Mode
   if (settings.privateMode && !user.isAuthorized && !user.isAdmin) {
-    if (inviteCode && settings.accessCodes.includes(inviteCode)) {
-      // Authorize user
-      user.isAuthorized = true;
-      await user.save();
-      await ctx.reply('✅ Accès autorisé ! Bienvenue.');
+    if (inviteCode) {
+      // Check InviteCode model
+      const invite = await InviteCode.findOne({ code: inviteCode });
+      
+      if (invite) {
+        if (invite.type === 'one_time' && invite.isUsed) {
+          await ctx.reply('🔒 Ce code d\'invitation a déjà été utilisé.');
+          return;
+        }
+
+        if (invite.type === 'one_time') {
+          invite.isUsed = true;
+          invite.usedBy = telegramId;
+          invite.usedAt = new Date();
+          await invite.save();
+        }
+
+        user.isAuthorized = true;
+        await user.save();
+        await ctx.reply('✅ Accès autorisé ! Bienvenue.');
+      } else if (settings.accessCodes.includes(inviteCode)) {
+        // Legacy check
+        user.isAuthorized = true;
+        await user.save();
+        await ctx.reply('✅ Accès autorisé ! Bienvenue.');
+      } else {
+        await ctx.reply('🔒 Ce bot est privé. Le code d\'invitation est invalide.');
+        return;
+      }
     } else {
       await ctx.reply('🔒 Ce bot est privé. Le code d\'invitation est invalide ou manquant.');
       return;

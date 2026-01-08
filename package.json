@@ -1,5 +1,5 @@
 {
-  "name": "footbot",
+  "name": "cotybet",
   "version": "1.0.0",
   "description": "Bot Telegram d'intelligence artificielle pour l'analyse de matchs de football",
   "main": "dist/index.js",

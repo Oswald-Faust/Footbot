@@ -2,7 +2,7 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
-import { User, Message, Payment, getSettings, updateSettings } from '../database/index.js';
+import { User, Message, Payment, getSettings, updateSettings, InviteCode } from '../database/index.js';
 import { stripeService } from '../services/stripeService.js';
 
 const app = express();
@@ -256,6 +256,87 @@ app.patch('/api/settings', async (req: Request, res: Response) => {
     res.json(settings);
   } catch (error) {
     logger.error('Failed to update settings', { error });
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Invite Codes
+// ═══════════════════════════════════════════════════════════════
+
+app.get('/api/invites', async (req: Request, res: Response) => {
+  try {
+    // Get both new model codes and legacy codes
+    const [invites, settings] = await Promise.all([
+      InviteCode.find().sort({ createdAt: -1 }),
+      getSettings()
+    ]);
+    
+    // Sort legacy codes to be safe (though they are just strings)
+    const legacyCodes = (settings.accessCodes || []).map(code => ({
+      _id: `legacy_${code}`,
+      code,
+      type: 'unlimited',
+      isUsed: false,
+      isLegacy: true,
+      createdAt: new Date().toISOString()
+    }));
+    
+    res.json({ invites, legacyCodes });
+  } catch (error) {
+    logger.error('Failed to get invites', { error });
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.post('/api/invites', async (req: Request, res: Response) => {
+  try {
+    const { code, type } = req.body;
+    
+    // Check if exists in DB
+    const existing = await InviteCode.findOne({ code });
+    if (existing) {
+      res.status(400).json({ error: 'Ce code existe déjà' });
+      return;
+    }
+    
+    // Check if exists in legacy
+    const settings = await getSettings();
+    if (settings.accessCodes.includes(code)) {
+      res.status(400).json({ error: 'Ce code existe déjà (legacy)' });
+      return;
+    }
+    
+    const invite = await InviteCode.create({
+      code,
+      type: type || 'one_time',
+      isUsed: false
+    });
+    
+    res.json(invite);
+  } catch (error) {
+    logger.error('Failed to create invite', { error });
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.delete('/api/invites/:code', async (req: Request, res: Response) => {
+  try {
+    const { code } = req.params;
+    
+    // Try to delete from new model
+    const deleted = await InviteCode.findOneAndDelete({ code });
+    
+    // Also try to remove from legacy Settings
+    const settings = await getSettings();
+    if (settings.accessCodes.includes(code)) {
+      const newCodes = settings.accessCodes.filter(c => c !== code);
+      await updateSettings({ accessCodes: newCodes });
+    }
+    
+    res.json({ success: true, deleted });
+  } catch (error) {
+    logger.error('Failed to delete invite', { error });
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });

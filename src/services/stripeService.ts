@@ -108,7 +108,7 @@ class StripeService {
           price_data: {
             currency: 'eur',
             product_data: {
-              name: `FootBot - ${pkg.name}`,
+              name: `Cotybet - ${pkg.name}`,
               description: `${messages} analyses de match`,
             },
             unit_amount: pkg.price, // Already in centimes

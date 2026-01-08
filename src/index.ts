@@ -6,7 +6,7 @@ import { startAPI } from './api/admin.js';
 
 async function main() {
   logger.info('═══════════════════════════════════════════════════');
-  logger.info('⚽ FootBot - Football AI Analysis Bot');
+  logger.info('⚽ Cotybet - Football AI Analysis Bot');
   logger.info('═══════════════════════════════════════════════════');
   logger.info(`Environment: ${config.NODE_ENV}`);
   logger.info(`Log Level: ${config.LOG_LEVEL}`);
