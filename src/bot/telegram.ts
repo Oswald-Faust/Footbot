@@ -46,6 +46,37 @@ bot.catch((err, ctx) => {
   ctx.reply('❌ Une erreur est survenue. Veuillez réessayer.').catch(() => {});
 });
 
+// Access Control Middleware
+bot.use(async (ctx, next) => {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return next();
+
+  const settings = await getSettings();
+  if (!settings.privateMode) return next();
+
+  // Allow admins to bypass
+  const user = await User.findOne({ telegramId });
+  if (user?.isAdmin || user?.isAuthorized) return next();
+
+  // Allow /start with code
+  if (ctx.message && 'text' in ctx.message && ctx.message.text.startsWith('/start ')) {
+    return next();
+  }
+
+  // Allow /start without code ONLY to show the "enter code" message (handled in command)
+  if (ctx.message && 'text' in ctx.message && ctx.message.text === '/start') {
+    return next();
+  }
+
+  // Allow /code command
+  if (ctx.message && 'text' in ctx.message && ctx.message.text.startsWith('/code')) {
+    return next();
+  }
+  
+  // Block everything else
+  await ctx.reply('🔒 Ce bot est privé.\n\n🔑 Pour entrer, tapez `/code VOTRE_CODE`\n\nOu utilisez le lien d\'invitation reçu.', { parse_mode: 'Markdown' });
+});
+
 // ═══════════════════════════════════════════════════════════════
 // Helper Functions
 // ═══════════════════════════════════════════════════════════════
@@ -95,16 +126,70 @@ function getQuotaStatusMessage(remainingFree: number, credits: number, costPerMe
 // Commands
 // ═══════════════════════════════════════════════════════════════
 
+bot.command('code', async (ctx) => {
+  const telegramId = ctx.from?.id;
+  if (!telegramId) return;
+
+  const args = ctx.message.text.split(' ');
+  const code = args[1]; // /code <code>
+
+  if (!code) {
+    await ctx.reply('❌ Usage: `/code VOTRE_CODE`', { parse_mode: 'Markdown' });
+    return;
+  }
+
+  const settings = await getSettings();
+  
+  if (!settings.privateMode) {
+    await ctx.reply('🔓 Le bot est public, vous n\'avez pas besoin de code.');
+    return;
+  }
+
+  const user = await quotaService.getOrCreateUser(telegramId);
+  
+  if (user.isAuthorized) {
+    await ctx.reply('✅ Vous avez déjà accès au bot.');
+    return;
+  }
+
+  if (settings.accessCodes.includes(code)) {
+    // Authorize user
+    user.isAuthorized = true;
+    await user.save();
+    await ctx.reply('✅ Accès autorisé ! Bienvenue sur FootBot ⚽\n\nTapez /start pour commencer ou envoyez directement une photo de match !');
+  } else {
+    await ctx.reply('❌ Code invalide.');
+  }
+});
+
 bot.command('start', async (ctx) => {
   const telegramId = ctx.from?.id;
   if (!telegramId) return;
   
+  const args = ctx.message.text.split(' ');
+  const inviteCode = args[1]; // /start <code>
+  
+  const settings = await getSettings();
+  
   // Register user
-  await quotaService.getOrCreateUser(telegramId, {
+  const user = await quotaService.getOrCreateUser(telegramId, {
     username: ctx.from?.username,
     firstName: ctx.from?.first_name,
     lastName: ctx.from?.last_name,
   });
+  
+  // Handle Private Mode
+  if (settings.privateMode && !user.isAuthorized && !user.isAdmin) {
+    if (inviteCode && settings.accessCodes.includes(inviteCode)) {
+      // Authorize user
+      user.isAuthorized = true;
+      await user.save();
+      await ctx.reply('✅ Accès autorisé ! Bienvenue.');
+    } else {
+      await ctx.reply('🔒 Ce bot est privé. Le code d\'invitation est invalide ou manquant.');
+      return;
+    }
+  }
   
   const stats = await quotaService.getUserStats(telegramId);
   
@@ -683,6 +768,63 @@ bot.command('admin_setfree', async (ctx) => {
   await updateSettings({ freeMessagesLimit: limit });
   
   await ctx.reply(`✅ Limite de messages gratuits changée à ${limit}`);
+});
+
+bot.command('admin_private', async (ctx) => {
+  const adminId = ctx.from?.id;
+  if (!adminId) return;
+  
+  const admin = await User.findOne({ telegramId: adminId });
+  if (!admin?.isAdmin) {
+    await ctx.reply('❌ Accès refusé');
+    return;
+  }
+  
+  const settings = await getSettings();
+  const newMode = !settings.privateMode;
+  await updateSettings({ privateMode: newMode });
+  
+  await ctx.reply(`🔒 Mode privé : ${newMode ? '✅ Activé' : '❌ Désactivé'}`);
+});
+
+bot.command('admin_invite', async (ctx) => {
+  const adminId = ctx.from?.id;
+  if (!adminId) return;
+  
+  const admin = await User.findOne({ telegramId: adminId });
+  if (!admin?.isAdmin) {
+    await ctx.reply('❌ Accès refusé');
+    return;
+  }
+  
+  const args = ctx.message.text.split(' ');
+  const action = args[1]; // add, list, remove
+  const code = args[2];
+  
+  const settings = await getSettings();
+  const codes = settings.accessCodes || [];
+  
+  if (action === 'add' && code) {
+    if (!codes.includes(code)) {
+      codes.push(code);
+      await updateSettings({ accessCodes: codes });
+      await ctx.reply(`✅ Code d'invitation ajouté : \`${code}\``, { parse_mode: 'Markdown' });
+    } else {
+      await ctx.reply('❌ Ce code existe déjà');
+    }
+  } else if (action === 'remove' && code) {
+    const newCodes = codes.filter(c => c !== code);
+    await updateSettings({ accessCodes: newCodes });
+    await ctx.reply(`🗑️ Code supprimé : ${code}`);
+  } else if (action === 'list') {
+    const list = codes.length > 0 ? codes.map(c => `• \`${c}\``).join('\n') : 'Aucun code';
+    await ctx.reply(`📝 **Codes d'invitation :**\n\n${list}`, { parse_mode: 'Markdown' });
+  } else {
+    await ctx.reply(
+      'Usage:\n/admin\\_invite add [code]\n/admin\\_invite remove [code]\n/admin\\_invite list',
+      { parse_mode: 'Markdown' }
+    );
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════

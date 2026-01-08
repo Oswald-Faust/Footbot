@@ -23,6 +23,7 @@ export interface IUser extends Document {
   isAdmin: boolean;
   isBanned: boolean;
   banReason?: string;
+  isAuthorized: boolean;
   
   // Timestamps
   createdAt: Date;
@@ -87,6 +88,12 @@ const UserSchema = new Schema<IUser>({
     default: false,
   },
   banReason: String,
+  
+  // Access Control
+  isAuthorized: {
+    type: Boolean,
+    default: false,
+  },
   
   // Stats
   totalSpent: {

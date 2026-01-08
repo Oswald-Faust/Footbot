@@ -51,6 +51,7 @@ export interface User {
   isAdmin: boolean;
   isBanned: boolean;
   banReason?: string;
+  isAuthorized: boolean;
   totalSpent: number;
   createdAt: string;
   lastActiveAt: string;
@@ -122,7 +123,6 @@ export async function getPayments(
   return apiRequest(`/api/payments?${params}`);
 }
 
-// Settings
 export interface Settings {
   freeMessagesLimit: number;
   costPerMessage: number;
@@ -130,6 +130,8 @@ export interface Settings {
   premiumMonthlyPrice: number;
   premiumYearlyPrice: number;
   maintenanceMode: boolean;
+  privateMode: boolean;
+  accessCodes: string[];
   creditPackages: {
     id: string;
     name: string;

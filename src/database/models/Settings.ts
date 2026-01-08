@@ -25,6 +25,8 @@ export interface ISettings extends Document {
   
   // Bot settings
   maintenanceMode: boolean;
+  privateMode: boolean;
+  accessCodes: string[];
   welcomeMessage?: string;
   
   // Timestamps
@@ -80,6 +82,14 @@ const SettingsSchema = new Schema<ISettings>({
   maintenanceMode: {
     type: Boolean,
     default: false,
+  },
+  privateMode: {
+    type: Boolean,
+    default: false,
+  },
+  accessCodes: {
+    type: [String],
+    default: [],
   },
   welcomeMessage: String,
 }, {
